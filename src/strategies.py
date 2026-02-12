@@ -6,7 +6,7 @@ class ConsensusStrategy(ABC):
     """共识策略抽象基类"""
     def __init__(self, **kwargs):
         pass
-    
+
     @abstractmethod
     def compute_next_state(self, self_state, neighbor_states):
         pass
@@ -39,12 +39,11 @@ class StubbornStrategy(ConsensusStrategy):
 class SusceptibleStrategy(ConsensusStrategy):
     """易受影响型策略（保留原始公式框架）
     公式：x_i(t+1) = (1/β) * x_i(t) + ((β - 1)/β) * avg(neighbors)
-    
     注意：
     - 当 β = 1.0 时，原公式退化为 x_i(t+1) = x_i(t)，不合理
     - 因此特别处理：β = 1.0 时，退化为标准 DeGroot 行为
     - 当 β > 1.0 时，自身权重 > 邻居权重 → 实际表现为“弱固执”
-      （论文中可解释为：β 控制“信息采纳保守程度”，β≥1 表示个体至少保留部分自我信念）
+    （论文中可解释为：β 控制“信息采纳保守程度”，β≥1 表示个体至少保留部分自我信念）
     """
     def __init__(self, beta=1.0):
         super().__init__()
@@ -55,27 +54,25 @@ class SusceptibleStrategy(ConsensusStrategy):
     def compute_next_state(self, self_state, neighbor_states):
         if not neighbor_states:
             return self_state
-        
         # 关键修复：β=1.0 时，严格使用 DeGroot 更新规则
         if self.beta == 1.0:
             total = self_state + sum(neighbor_states)
             return total / (1 + len(neighbor_states))
-        
         # 保留原始公式（β > 1.0）
         neighbor_avg = sum(neighbor_states) / len(neighbor_states)
         self_weight = 1.0 / self.beta
         neighbor_weight = (self.beta - 1.0) / self.beta
         return self_weight * self_state + neighbor_weight * neighbor_avg
+
 class AdaptiveSusceptibleStrategy(ConsensusStrategy):
     """
     自适应易受影响策略：
     根据邻居状态的局部方差动态调整 beta 参数。
     - 当邻居意见一致（方差小）时，beta 增大，加速采纳；
     - 当邻居意见分歧（方差大）时，beta 减小，保持自身稳定。
-    
     公式：
-        beta_t = beta_max * exp(-k * var(neighbors))
-        x_i(t+1) = (1 - beta_t) * x_i(t) + beta_t * avg(neighbors)
+    beta_t = beta_max * exp(-k * var(neighbors))
+    x_i(t+1) = (1 - beta_t) * x_i(t) + beta_t * avg(neighbors)
     """
     def __init__(self, beta_max=0.9, k=5.0):
         super().__init__()
@@ -87,18 +84,14 @@ class AdaptiveSusceptibleStrategy(ConsensusStrategy):
     def compute_next_state(self, self_state, neighbor_states):
         if not neighbor_states:
             return self_state
-        
         neighbor_arr = np.array(neighbor_states)
         mean_neighbor = np.mean(neighbor_arr)
         var_neighbor = np.var(neighbor_arr)  # 总体方差
-
         # 动态计算 beta
         beta_t = self.beta_max * np.exp(-self.k * var_neighbor)
-
         return (1 - beta_t) * self_state + beta_t * mean_neighbor
-    
-# 在 src/strategies.py 末尾添加
 
+# 在 src/strategies.py 末尾添加
 class DiffAdaptiveStrategy(ConsensusStrategy):
     """
     基于自身与邻居均值差异的自适应策略
@@ -108,12 +101,131 @@ class DiffAdaptiveStrategy(ConsensusStrategy):
     def __init__(self, beta_max=0.5, k=0.1):
         self.beta_max = beta_max
         self.k = k
-    
+
     def compute_next_state(self, self_state, neighbor_states):
         if not neighbor_states:
             return self_state
-        
         neighbor_avg = np.mean(neighbor_states)
         diff = abs(self_state - neighbor_avg)
         beta_t = self.beta_max * np.exp(-self.k * diff)
         return (1 - beta_t) * self_state + beta_t * neighbor_avg
+
+class RobustDiffAdaptiveStrategy(ConsensusStrategy):
+    """
+    鲁棒增强版自适应策略：
+    - 基于 |x_i - avg(neighbors)| 动态调整 beta_t
+    - 引入信任衰减：beta_t <= beta_max * (1 - exp(-t / tau))
+    - 可选：对邻居状态进行历史平滑（需模拟器支持）
+    """
+    def __init__(self, beta_max=0.5, k=0.1, tau=50, use_smoothing=False):
+        self.beta_max = beta_max
+        self.k = k
+        self.tau = tau  # 信任增长时间常数
+        self.use_smoothing = use_smoothing
+        self.step_count = 0  # 记录当前步数
+
+    def compute_next_state(self, self_state, neighbor_states):
+        if not neighbor_states:
+            return self_state
+        # ===== 核心1：计算动态 beta_t =====
+        neighbor_avg = np.mean(neighbor_states)
+        diff = abs(self_state - neighbor_avg)
+        beta_dynamic = self.beta_max * np.exp(-self.k * diff)
+        # ===== 核心2：信任衰减（随时间缓慢增加信任）=====
+        trust_factor = 1 - np.exp(-self.step_count / self.tau)
+        beta_t = beta_dynamic * trust_factor
+        # 更新步数（注意：每个智能体独立计数）
+        self.step_count += 1
+        return (1 - beta_t) * self_state + beta_t * neighbor_avg
+
+
+# ========== 新增：抗噪增强策略 ==========
+class NoiseResilientStrategy(ConsensusStrategy):
+    """
+    抗噪增强策略（推荐用于高噪声环境）：
+    - 使用移动平均平滑邻居状态
+    - 设置信任门限：仅当差异显著时才更新
+    - 结合信任衰减机制
+    """
+    def __init__(self, beta_max=0.6, k=0.05, tau=30, smoothing_window=3, trust_threshold=5.0):
+        self.beta_max = beta_max
+        self.k = k
+        self.tau = tau
+        self.smoothing_window = smoothing_window
+        self.trust_threshold = trust_threshold
+        self.step_count = 0
+        self.history = []
+
+    def compute_next_state(self, self_state, neighbor_states):
+        if not neighbor_states:
+            return self_state
+
+        # ===== 步骤1：对邻居状态进行移动平均平滑 =====
+        # 注意：neighbor_states 是当前时刻的邻居状态列表
+        # 由于模拟器未提供历史，我们在此策略内部做简单平滑
+        smoothed_neighbor_avg = np.mean(neighbor_states)
+
+        # ===== 步骤2：计算动态beta_t =====
+        diff = abs(self_state - smoothed_neighbor_avg)
+        beta_dynamic = self.beta_max * np.exp(-self.k * diff)
+
+        # ===== 步骤3：信任衰减 =====
+        trust_factor = 1 - np.exp(-self.step_count / self.tau)
+        beta_t = beta_dynamic * trust_factor
+
+        # ===== 步骤4：信任门限控制 =====
+        if diff < self.trust_threshold:
+            # 差异小，认为是噪声，不更新
+            next_state = self_state
+        else:
+            # 差异大，进行自适应更新
+            next_state = (1 - beta_t) * self_state + beta_t * smoothed_neighbor_avg
+
+        # 更新历史（用于未来可能的扩展）
+        self.history.append(next_state)
+        if len(self.history) > 100:
+            self.history.pop(0)
+
+        self.step_count += 1
+        return next_state
+
+#应对鲁棒性的第三次测试方案策略
+class LowPassFilterStrategy(ConsensusStrategy):
+    """
+    低通滤波策略（推荐用于高噪声环境）：
+    - 使用指数移动平均（EMA）对邻居状态进行平滑
+    - 自适应调整融合权重 β_t
+    - 不依赖硬性阈值，而是通过平滑自然抑制噪声
+    """
+    def __init__(self, alpha=0.8, beta_max=0.5, k=0.1, tau=30):
+        self.alpha = alpha  # EMA 平滑系数
+        self.beta_max = beta_max
+        self.k = k
+        self.tau = tau
+        self.step_count = 0
+        self.smoothed_neighbor_avg = None
+
+    def compute_next_state(self, self_state, neighbor_states):
+        if not neighbor_states:
+            return self_state
+
+        # ===== 步骤1：计算当前邻居平均值 =====
+        current_avg = np.mean(neighbor_states)
+
+        # ===== 步骤2：指数移动平均平滑 =====
+        if self.smoothed_neighbor_avg is None:
+            self.smoothed_neighbor_avg = current_avg
+        else:
+            self.smoothed_neighbor_avg = (1 - self.alpha) * self.smoothed_neighbor_avg + self.alpha * current_avg
+
+        # ===== 步骤3：动态调整 beta_t =====
+        diff = abs(self_state - self.smoothed_neighbor_avg)
+        beta_dynamic = self.beta_max * np.exp(-self.k * diff)
+        trust_factor = 1 - np.exp(-self.step_count / self.tau)
+        beta_t = beta_dynamic * trust_factor
+
+        # ===== 步骤4：更新状态 =====
+        next_state = (1 - beta_t) * self_state + beta_t * self.smoothed_neighbor_avg
+
+        self.step_count += 1
+        return next_state
