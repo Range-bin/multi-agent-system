@@ -1,13 +1,15 @@
-# experiments/17_lowpass_filter_test.py (增强版)
+# experiments/17_lowpass_filter_test.py
 
 import sys
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+# 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
 
+# 添加项目根目录到 Python 路径
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -16,11 +18,12 @@ from src.consensus_simulator import ConsensusSimulator
 from src.strategies import LowPassFilterStrategy, SusceptibleStrategy
 
 def create_simulator_with_strategy(n_agents, topology, initial_state_range, strategy_instance, max_iterations):
+    """通用创建函数，用于注入自定义策略"""
     sim = ConsensusSimulator(
         n_agents=n_agents,
         topology=topology,
         initial_state_range=initial_state_range,
-        strategy='deGroot',
+        strategy='deGroot',  # 临时占位
         max_iterations=max_iterations,
         verbose=False
     )
@@ -29,60 +32,98 @@ def create_simulator_with_strategy(n_agents, topology, initial_state_range, stra
     return sim
 
 def main():
-    print("🔍 启动噪声鲁棒性边界测试：寻找策略崩溃阈值...\n")
+    print("🔍 启动低通滤波策略专项测试：高噪声下的鲁棒性验证...\n")
     
     N_AGENTS = 20
     TOPOLOGY = 'ring'
     INITIAL_RANGE = (0, 100)
     MAX_ITER = 1000
     TOLERANCE = 1e-3
+    NOISE_STD = 2.0  # 强噪声
 
-    # 测试多个噪声水平
-    noise_levels = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
-    strategies = {
-        "Fixed (β=2.0)": SusceptibleStrategy(beta=2.0),
-        "Low-Pass Filter": LowPassFilterStrategy(alpha=0.9, beta_max=0.6, k=0.05, tau=50)
+    # === 定义待测策略 ===
+    fixed_strategy = SusceptibleStrategy(beta=2.0)  # 作为基线
+    low_pass_strategy = LowPassFilterStrategy(
+        alpha=0.9,      # 高平滑系数 → 强抗噪
+        beta_max=0.6,
+        k=0.05,
+        tau=50
+    )
+
+    scenarios = {
+        "无噪声": {"noise_std": 0.0},
+        "有噪声": {"noise_std": NOISE_STD}
     }
 
-    results = {name: [] for name in strategies}
-    final_stds = {name: [] for name in strategies}
+    results = {}
+    histories = {}
 
-    for noise_std in noise_levels:
-        print(f"▶ 测试噪声 σ = {noise_std} ...")
-        for name, strategy in strategies.items():
-            sim = create_simulator_with_strategy(N_AGENTS, TOPOLOGY, INITIAL_RANGE, strategy, MAX_ITER)
-            steps = sim.run_until_convergence(tolerance=TOLERANCE, noise_std=noise_std, verbose=False)
-            final_std = np.std(sim.get_state_history()[-1])
-            results[name].append(steps)
-            final_stds[name].append(final_std)
+    for scenario_name, params in scenarios.items():
+        print(f"▶ 测试场景: {scenario_name} (噪声σ={params['noise_std']})...")
+        
+        # 基线策略
+        sim_fixed = create_simulator_with_strategy(
+            N_AGENTS, TOPOLOGY, INITIAL_RANGE, fixed_strategy, MAX_ITER
+        )
+        steps_fixed = sim_fixed.run_until_convergence(
+            tolerance=TOLERANCE, 
+            noise_std=params['noise_std'], 
+            verbose=False
+        )
+        avg_fixed = [np.mean(states) for states in sim_fixed.get_state_history()]
+        
+        # 低通滤波策略
+        sim_lowpass = create_simulator_with_strategy(
+            N_AGENTS, TOPOLOGY, INITIAL_RANGE, low_pass_strategy, MAX_ITER
+        )
+        steps_lowpass = sim_lowpass.run_until_convergence(
+            tolerance=TOLERANCE, 
+            noise_std=params['noise_std'], 
+            verbose=False
+        )
+        avg_lowpass = [np.mean(states) for states in sim_lowpass.get_state_history()]
 
-    # ===== 输出结果 =====
-    print("\n" + "="*80)
-    print("📊 噪声鲁棒性边界测试结果")
-    print("="*80)
-    print(f"{'噪声σ':<8} {'策略':<20} {'迭代轮数':<10} {'最终标准差':<12}")
-    print("-"*80)
-    for i, noise in enumerate(noise_levels):
-        for name in strategies:
-            steps = results[name][i]
-            std = final_stds[name][i]
-            steps_str = str(steps) if steps < MAX_ITER else "∞"
-            print(f"{noise:<8} {name:<20} {steps_str:<10} {std:<12.4f}")
+        results[scenario_name] = {
+            'fixed': steps_fixed,
+            'lowpass': steps_lowpass
+        }
+        histories[scenario_name] = {
+            'fixed': avg_fixed,
+            'lowpass': avg_lowpass,
+            'global_mean': np.mean(sim_fixed.get_state_history()[0])
+        }
 
-    # ===== 绘图：最终标准差 vs 噪声 =====
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-    for name in strategies:
-        ax.plot(noise_levels, final_stds[name], 'o-', label=name, linewidth=2, markersize=6)
-    ax.set_xlabel('Noise Standard Deviation (σ)')
-    ax.set_ylabel('Final Consensus Standard Deviation')
-    ax.set_title('Robustness Boundary: Final Std vs Noise Level')
-    ax.legend()
-    ax.grid(True, linestyle=':', alpha=0.7)
+    # ===== 结果输出 =====
+    print("\n" + "="*60)
+    print("📊 低通滤波策略专项测试结果")
+    print("="*60)
+    for scenario, res in results.items():
+        print(f"\n【{scenario}】")
+        print(f"  固定策略 (β=2.0) : {res['fixed']} 轮")
+        print(f"  低通滤波策略     : {res['lowpass']} 轮")
+        if res['fixed'] < MAX_ITER and res['lowpass'] < MAX_ITER:
+            improvement = (res['fixed'] - res['lowpass']) / res['fixed'] * 100
+            print(f"  性能提升 (vs Fixed) : {improvement:.1f}%")
+
+    # ===== 绘图 =====
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+
+    for idx, (scenario, hist) in enumerate(histories.items()):
+        ax = axes[idx]
+        ax.plot(hist['fixed'], '--', label=f'Fixed β=2.0 ({results[scenario]["fixed"]} steps)', linewidth=2)
+        ax.plot(hist['lowpass'], '-', label=f'Low-Pass Filter ({results[scenario]["lowpass"]} steps)', linewidth=2.5)
+        ax.axhline(y=hist['global_mean'], color='r', linestyle=':', label='Global Mean')
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Average State')
+        ax.set_title(f'{scenario} (Noise σ={scenarios[scenario]["noise_std"]})')
+        ax.legend()
+        ax.grid(True, linestyle=':', alpha=0.7)
+
     plt.tight_layout()
-    plt.savefig('robustness_boundary.png', dpi=200)
+    plt.savefig('lowpass_filter_test.png', dpi=200, bbox_inches='tight')
     plt.show()
 
-    print("\n✅ 噪声鲁棒性边界测试完成！结果已保存至 'robustness_boundary.png'")
+    print("\n✅ 低通滤波策略测试完成！结果已保存至 'lowpass_filter_test.png'")
 
 if __name__ == "__main__":
     main()
